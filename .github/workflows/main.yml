@@ -16,11 +16,11 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0
 
-          # Keep NLA enabled (secure)
+          # Keep NLA enabled (more secure)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 1
 
-          # Enable Firewall Rule for RDP
+          # Enable built-in firewall rule
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
           Restart-Service -Name TermService -Force
@@ -29,12 +29,61 @@ jobs:
         id: user_gen
         shell: powershell
         run: |
-          $password = [System.Web.Security.Membership]::GeneratePassword(16,4)
+          # Generate strong 16-character password
+          $password = -join ((33..126) | Get-Random -Count 16 | ForEach-Object {[char]$_})
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
+          # Create user
           New-LocalUser -Name "RDPUser" `
             -Password $securePass `
             -FullName "RDP User" `
+            -Description "Temporary RDP User" `
+            -AccountNeverExpires
+
+          # Add to required groups
+          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+
+          echo "password=$password" >> $env:GITHUB_OUTPUT
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $path = "$env:TEMP\tailscale.msi"
+
+          Invoke-WebRequest -Uri $url -OutFile $path
+          Start-Process msiexec.exe -ArgumentList "/i `"$path`" /quiet /norestart" -Wait
+          Remove-Item $path -Force
+
+      - name: Connect Tailscale
+        shell: powershell
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $ts up --authkey=$env:TS_KEY --hostname=gh-win-${{ github.run_id }}
+
+          $ip = & $ts ip -4
+          if (-not $ip) { throw "Tailscale IP not assigned." }
+
+          echo "TS_IP=$ip" >> $env:GITHUB_ENV
+
+      - name: Display Connection Info
+        shell: powershell
+        run: |
+          Write-Host "==============================="
+          Write-Host " WINDOWS RDP ACCESS"
+          Write-Host " Address : $env:TS_IP"
+          Write-Host " Username: RDPUser"
+          Write-Host " Password: ${{ steps.user_gen.outputs.password }}"
+          Write-Host "==============================="
+
+          while ($true) {
+            Write-Host "[$(Get-Date)] Runner Active..."
+            Start-Sleep -Seconds 300
+          }            -FullName "RDP User" `
             -Description "Temporary RDP User"
 
           Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
